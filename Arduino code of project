@@ -1,0 +1,406 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <DHT.h>
+
+// ================= LCD =================
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// ================= DHT11 =================
+#define DHTPIN A1
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+// ================= LDR =================
+#define LDR_PIN A2
+
+// ================= Buttons =================
+#define BTN_UPPER 13
+#define BTN_LOWER 12
+#define BTN_NEXT 8    // Button 3
+
+// ================= LEDs =================
+#define GREEN_LED 5
+#define YELLOW_LED 6
+#define RED_LED 7
+
+// ================= Buzzer =================
+#define BUZZER 3      // Pin 3 (avoids conflict with Pin 8)
+
+// ================= System States (No Enum) =================
+// 0 = STATE_MENU
+// 1 = STATE_VIEWING_DATA
+// 2 = STATE_INACTIVITY_WARNING
+int systemState = 0;
+
+// ================= Variables =================
+float temperature = 0;
+float humidity = 0;
+int ldrValue = 0;
+
+int menuPage = 0;
+int activeOption = 0;
+
+// Timing variables (millis)
+unsigned long menuEntryTime = 0;
+const unsigned long inactivityTimeout = 5000; // 5 seconds on menu page
+
+unsigned long viewStartTime = 0;
+const unsigned long viewDuration = 2500; // Display function data for 2.5 seconds
+
+// Statistics
+float maxTemp = -100;
+float minTemp = 100;
+float tempSum = 0;
+unsigned long readingCount = 0;
+
+// =================================================
+// SETUP
+// =================================================
+
+void setup()
+{
+  Serial.begin(9600);
+
+  lcd.init();
+  lcd.backlight();
+
+  dht.begin();
+
+  pinMode(BTN_UPPER, INPUT_PULLUP);
+  pinMode(BTN_LOWER, INPUT_PULLUP);
+  pinMode(BTN_NEXT, INPUT_PULLUP);
+
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(YELLOW_LED, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+
+  pinMode(BUZZER, OUTPUT);
+
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("SMART WEATHER");
+
+  lcd.setCursor(0,1);
+  lcd.print("STATION");
+
+  delay(2000); // Startup delay
+
+  showMenu();
+}
+
+// =================================================
+// LOOP (Non-Blocking)
+// =================================================
+
+void loop()
+{
+  readSensors();
+  updateStats();
+  updateLEDs();
+  checkAlarm();
+
+  handleButtons();
+  checkStateTiming();
+}
+
+// =================================================
+// SENSOR READING
+// =================================================
+
+void readSensors()
+{
+  temperature = dht.readTemperature();
+  humidity = dht.readHumidity();
+  ldrValue = analogRead(LDR_PIN);
+
+  if(isnan(temperature) || isnan(humidity))
+  {
+    temperature = 0;
+    humidity = 0;
+  }
+}
+
+// =================================================
+// STATE & TIMING MANAGEMENT
+// =================================================
+
+void checkStateTiming()
+{
+  unsigned long currentMillis = millis();
+
+  // If viewing function data, return to the exact same menu page after 2.5 seconds
+  if(systemState == 1) // Viewing Data
+  {
+    if(currentMillis - viewStartTime >= viewDuration)
+    {
+      showMenu(); // Returns to menu state and resets 5s timer
+    }
+  }
+  // If staying on the menu option page too long without pressing Button 3
+  else if(systemState == 0) // Menu
+  {
+    if(currentMillis - menuEntryTime >= inactivityTimeout)
+    {
+      systemState = 2; // Inactivity Warning
+      showInactivityWarning();
+    }
+  }
+}
+
+void showInactivityWarning()
+{
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("PLEASE PRESS");
+  lcd.setCursor(0,1);
+  lcd.print("BTN 3 (NEXT)!");
+}
+
+void showMenu()
+{
+  systemState = 0;          // Set state to Menu
+  menuEntryTime = millis(); // Reset 5-second timer whenever menu is shown
+  lcd.clear();
+
+  switch(menuPage)
+  {
+    case 0:
+      lcd.setCursor(0,0);
+      lcd.print("1.Current Data");
+      lcd.setCursor(0,1);
+      lcd.print("2.Light Level");
+      break;
+
+    case 1:
+      lcd.setCursor(0,0);
+      lcd.print("3.Comfort");
+      lcd.setCursor(0,1);
+      lcd.print("4.Forecast");
+      break;
+
+    case 2:
+      lcd.setCursor(0,0);
+      lcd.print("5.Warnings");
+      lcd.setCursor(0,1);
+      lcd.print("6.Statistics");
+      break;
+  }
+}
+
+// =================================================
+// BUTTON HANDLING
+// =================================================
+
+void handleButtons()
+{
+  static unsigned long lastDebounceTime = 0;
+  if(millis() - lastDebounceTime < 250) return; 
+
+  // Button 1 (Upper)
+  if(digitalRead(BTN_UPPER) == LOW)
+  {
+    lastDebounceTime = millis();
+    activeOption = 1;
+    systemState = 1; // Set state to Viewing Data
+    viewStartTime = millis();
+    displaySelection(menuPage, activeOption);
+  }
+  // Button 2 (Lower)
+  else if(digitalRead(BTN_LOWER) == LOW)
+  {
+    lastDebounceTime = millis();
+    activeOption = 2;
+    systemState = 1; // Set state to Viewing Data
+    viewStartTime = millis();
+    displaySelection(menuPage, activeOption);
+  }
+  // Button 3 (Next) - Changes menu page and resets timer
+  else if(digitalRead(BTN_NEXT) == LOW)
+  {
+    lastDebounceTime = millis();
+    
+    menuPage++;
+    if(menuPage > 2)
+      menuPage = 0;
+
+    showMenu(); // Resets timer and goes to next menu page
+  }
+}
+
+// =================================================
+// DISPLAY FUNCTIONS
+// =================================================
+
+void displaySelection(int page, int option)
+{
+  lcd.clear();
+
+  // 1. CURRENT DATA
+  if(page == 0 && option == 1)
+  {
+    lcd.setCursor(0,0);
+    lcd.print("T:");
+    lcd.print(temperature);
+    lcd.print("C");
+
+    lcd.setCursor(0,1);
+    lcd.print("H:");
+    lcd.print(humidity);
+    lcd.print("%");
+  }
+  // 2. LIGHT LEVEL
+  else if(page == 0 && option == 2)
+  {
+    lcd.setCursor(0,0);
+    lcd.print("Light:");
+    lcd.print(ldrValue);
+
+    lcd.setCursor(0,1);
+    lcd.print(getLightLevel());
+  }
+  // 3. COMFORT
+  else if(page == 1 && option == 1)
+  {
+    lcd.setCursor(0,0);
+    lcd.print("Comfort:");
+
+    lcd.setCursor(0,1);
+    lcd.print(getComfort());
+  }
+  // 4. FORECAST
+  else if(page == 1 && option == 2)
+  {
+    lcd.setCursor(0,0);
+    lcd.print("Forecast:");
+
+    lcd.setCursor(0,1);
+    lcd.print(getWeather());
+  }
+  // 5. WARNINGS
+  else if(page == 2 && option == 1)
+  {
+    lcd.setCursor(0,0);
+    lcd.print("Warning:");
+
+    lcd.setCursor(0,1);
+    lcd.print(getWarning());
+  }
+  // 6. STATISTICS
+  else if(page == 2 && option == 2)
+  {
+    lcd.setCursor(0,0);
+    lcd.print("Max:");
+    lcd.print(maxTemp);
+
+    lcd.setCursor(0,1);
+    lcd.print("Min:");
+    lcd.print(minTemp);
+  }
+}
+
+// =================================================
+// ANALYSIS FUNCTIONS
+// =================================================
+
+String getLightLevel()
+{
+  if(ldrValue > 800) return "BRIGHT";
+  else if(ldrValue > 400) return "NORMAL";
+  else return "DARK";
+}
+
+String getComfort()
+{
+  if(temperature >= 22 && temperature <= 28 && humidity >= 40 && humidity <= 60)
+    return "COMFORT";
+  else if(temperature > 35)
+    return "HOT";
+  else if(temperature < 18)
+    return "COLD";
+
+  return "MODERATE";
+}
+
+String getWeather()
+{
+  if(humidity > 80 && ldrValue < 300) return "RAIN?";
+  else if(humidity > 70 && ldrValue < 500) return "CLOUDY";
+  else if(humidity < 60 && ldrValue > 700) return "SUNNY";
+
+  return "NORMAL";
+}
+
+String getWarning()
+{
+  if(temperature > 40) return "HIGH TEMP";
+  if(humidity > 90) return "HIGH HUM";
+  if(ldrValue < 150) return "TOO DARK";
+
+  return "SAFE";
+}
+
+// =================================================
+// LED CONTROL
+// =================================================
+
+void updateLEDs()
+{
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(YELLOW_LED, LOW);
+  digitalWrite(RED_LED, LOW);
+
+  String warning = getWarning();
+
+  if(warning == "SAFE")
+  {
+    digitalWrite(GREEN_LED, HIGH);
+  }
+  else if(warning == "TOO DARK")
+  {
+    digitalWrite(YELLOW_LED, HIGH);
+  }
+  else
+  {
+    digitalWrite(RED_LED, HIGH);
+  }
+}
+
+// =================================================
+// BUZZER CONTROL
+// =================================================
+
+void checkAlarm()
+{
+  if(temperature > 40)
+  {
+    tone(BUZZER, 1000);
+  }
+  else if(humidity > 90)
+  {
+    tone(BUZZER, 800);
+  }
+  else
+  {
+    noTone(BUZZER);
+  }
+}
+
+// =================================================
+// STATISTICS
+// =================================================
+
+void updateStats()
+{
+  static unsigned long lastUpdate = 0;
+
+  if(millis() - lastUpdate >= 5000)
+  {
+    lastUpdate = millis();
+
+    if(temperature > maxTemp) maxTemp = temperature;
+    if(temperature < minTemp) minTemp = temperature;
+
+    tempSum += temperature;
+    readingCount++;
+  }
+}
